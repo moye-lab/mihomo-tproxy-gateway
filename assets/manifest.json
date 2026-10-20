@@ -1,0 +1,61 @@
+{
+  "generated_at": "2026-10-20",
+  "purpose": "专用兜底资产仓库清单：二进制文件不进 git 本体，作为专用资产仓库（sg/mihomo-assets）Release（tag v1.0.0）的附件托管；安装器先拉官方源，全部失败时按此清单从专用资产仓库 Release 按需拉取并验 sha256 后安装；服务跑通后由自动维护脚本经本地代理更新到官方版本。",
+  "total_size_bytes": 74706255,
+  "assets": [
+    {
+      "name": "mihomo-linux-amd64",
+      "version": "v1.19.32",
+      "filename": "mihomo-linux-amd64.gz",
+      "official_asset_name": "mihomo-linux-amd64-v1.19.32.gz",
+      "source_url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.32/mihomo-linux-amd64-v1.19.32.gz",
+      "size_bytes": 22846526,
+      "sha256": "8451100836c9eda194331c2babfad490b2faf30cebc1a04b0e76fd8ac2d35d10"
+    },
+    {
+      "name": "mihomo-linux-arm64",
+      "version": "v1.19.32",
+      "filename": "mihomo-linux-arm64.gz",
+      "official_asset_name": "mihomo-linux-arm64-v1.19.32.gz",
+      "source_url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.32/mihomo-linux-arm64-v1.19.32.gz",
+      "size_bytes": 20809592,
+      "sha256": "9dd862e28b46ff7d775f169cceebc28deccaa0a9e804237d421cd2571e0caba0"
+    },
+    {
+      "name": "metacubexd-dist",
+      "version": "v1.273.1",
+      "filename": "ui.tgz",
+      "official_asset_name": "compressed-dist.tgz",
+      "source_url": "https://github.com/MetaCubeX/metacubexd/releases/download/v1.273.1/compressed-dist.tgz",
+      "size_bytes": 2539072,
+      "sha256": "a178e00b67acabcda2dcef00afa90be6a7bb261e466a67dad58c8478d9553603"
+    },
+    {
+      "name": "geoip-dat",
+      "version": "latest@2026-10-20",
+      "filename": "GeoIP.dat",
+      "official_asset_name": "geoip.dat",
+      "source_url": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat",
+      "size_bytes": 16587463,
+      "sha256": "4a1b1eddabf5614fa51dd93ac0498856cb82dd65933cd6d6d5890d8c7bb5e902"
+    },
+    {
+      "name": "geosite-dat",
+      "version": "latest@2026-10-20",
+      "filename": "GeoSite.dat",
+      "official_asset_name": "geosite.dat",
+      "source_url": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat",
+      "size_bytes": 4276265,
+      "sha256": "9c3564269492ddd77539c0299223c70763dbdbb2742e20969522714e301ece34"
+    },
+    {
+      "name": "country-mmdb",
+      "version": "latest@2026-10-20",
+      "filename": "country.mmdb",
+      "official_asset_name": "country.mmdb",
+      "source_url": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb",
+      "size_bytes": 7647337,
+      "sha256": "8f52d5a2df1f1efe2653ce675b6cabc01909258a72b63b482abaab248a8a434d"
+    }
+  ]
+}

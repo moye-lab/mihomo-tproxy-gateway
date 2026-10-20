@@ -1,0 +1,69 @@
+mixed-port: 7890
+tproxy-port: 7893
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: warning
+ipv6: false
+
+external-controller: 0.0.0.0:9090
+external-ui: /etc/mihomo/ui
+# install.sh 会自动生成一个随机 secret 替换这里，不要留空 ——
+# 面板/API 监听在 0.0.0.0 上，没有密码等于局域网内任何设备都能改你的路由规则。
+secret: "CHANGE_ME_SECRET"
+
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.0/15
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "+.stun.*.*"
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  proxy-server-nameserver:
+    - https://1.1.1.1/dns-query
+  nameserver-policy:
+    "geosite:cn": [223.5.5.5, 119.29.29.29]
+
+proxy-providers:
+  airport1:
+    type: http
+    url: "YOUR_SUBSCRIPTION_URL_1"
+    interval: 86400
+    path: ./providers/airport1.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+  # 需要第二个机场做备用/分组，可以照抄这一段改名 airport2，
+  # 然后在下面 proxy-groups 的 use 列表里加上 airport2 即可。
+
+proxy-groups:
+  - name: "🚀 节点选择"
+    type: select
+    proxies:
+      - "⚡ 自动最优"
+    use:
+      - airport1
+  - name: "⚡ 自动最优"
+    type: url-test
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+    use:
+      - airport1
+
+rules:
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - GEOSITE,private,DIRECT
+  - GEOSITE,cn,DIRECT
+  - GEOIP,CN,DIRECT,no-resolve
+  - MATCH,🚀 节点选择
