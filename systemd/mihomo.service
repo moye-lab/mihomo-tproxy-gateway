@@ -1,0 +1,22 @@
+[Unit]
+Description=Mihomo Daemon, A rule based proxy in Go.
+After=network.target network-online.target nss-lookup.target systemd-resolved.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+ExecStart=/usr/local/bin/mihomo -d /etc/mihomo
+# 注意：这里用 ExecStartPost 而不是 ExecStartPre —— 必须等 mihomo 先监听
+# 好 TPROXY 端口，再挂 iptables 规则。反过来的话，服务刚启动的一小段
+# 时间窗口里，被转发到该端口的包会因为还没有监听者而被丢弃，表现为偶发、
+# 难复现的连接失败。
+ExecStartPost=/bin/bash /etc/mihomo/tproxy.sh
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
