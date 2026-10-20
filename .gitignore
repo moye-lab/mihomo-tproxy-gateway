@@ -1,0 +1,9 @@
+# 本地生成物与敏感文件，切勿提交：
+# 渲染后的真实配置里含订阅链接与面板密钥。
+config.yaml
+maintain.env
+*.env
+*.log
+*.bak
+*.bak.*
+.DS_Store
