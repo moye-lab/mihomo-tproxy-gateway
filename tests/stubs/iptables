@@ -1,0 +1,120 @@
+#!/bin/bash
+# stub iptables：带状态的 iptables 命令桩，供 P0/P1 桩测使用。
+# 每条链一个状态文件：$STUB_STATE/ipt-<table>-<chain>.txt
+# 支持 -N/-F/-A/-D/-X/-S/-n -L；-D 每次删一条匹配实例（与真实行为一致）；
+# -X 在链仍被 PREROUTING/FORWARD 跳转引用时失败（与真实行为一致）。
+# 以 ip6tables 名字调用时（stubs/ip6tables 为指向本文件的符号链接），
+# 状态文件前缀改为 ip6-ipt-，与 IPv4 状态隔离。
+# 故障注入：$STUB_STATE/iptables-tproxy-fail 存在时，含 TPROXY 的 -A 失败。
+S="${STUB_STATE:?STUB_STATE not set}"
+mkdir -p "$S"
+
+PROG="$(basename "$0")"
+if [ "$PROG" = "ip6tables" ]; then PREFIX="ip6-ipt-"; else PREFIX="ipt-"; fi
+
+table="filter"
+op=""
+chain=""
+rest=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -t) table="$2"; shift 2 ;;
+        -N|-F|-A|-D|-X|-S|-L) op="$1"; chain="$2"; shift 2; rest=("$@"); break ;;
+        -n) shift ;;  # -n -L 里的 -n：忽略
+        *) echo "stub iptables: unexpected arg: $1 (args: $*)" >&2; exit 1 ;;
+    esac
+done
+
+chain_file() { printf '%s/%s%s-%s.txt' "$S" "$PREFIX" "$table" "$1"; }
+
+case "$op" in
+    -N)
+        if [ -f "$(chain_file "$chain")" ]; then
+            echo "iptables: Chain already exists." >&2
+            exit 1
+        fi
+        : > "$(chain_file "$chain")"
+        exit 0
+        ;;
+    -F)
+        if [ ! -f "$(chain_file "$chain")" ]; then
+            echo "iptables: No chain/target/match by that name." >&2
+            exit 1
+        fi
+        : > "$(chain_file "$chain")"
+        exit 0
+        ;;
+    -A)
+        if [ -f "$S/iptables-tproxy-fail" ] && [[ "$*" == *"TPROXY"* ]]; then
+            echo "iptables: No chain/target/match by that name. (injected TPROXY failure)" >&2
+            exit 1
+        fi
+        if [ ! -f "$(chain_file "$chain")" ]; then
+            # 内建链首次写入时自动创建
+            case "$chain" in
+                PREROUTING|FORWARD|INPUT|OUTPUT)
+                    : > "$(chain_file "$chain")"
+                    ;;
+                *)
+                    echo "iptables: No chain/target/match by that name." >&2
+                    exit 1
+                    ;;
+            esac
+        fi
+        printf '%s\n' "$*" >> "$(chain_file "$chain")"
+        # 注意：上面 $* 是 -A 之后剩余参数的拼接；调用方传的规则原文即存入
+        exit 0
+        ;;
+    -D)
+        # -D <chain> <规则原文>：删除第一个完全一致的行
+        _f="$(chain_file "$chain")"
+        _rule="$*"
+        if [ ! -f "$_f" ] || ! grep -qxF -- "$_rule" "$_f"; then
+            echo "iptables: No chain/target/match by that name." >&2
+            exit 1
+        fi
+        awk -v rule="$_rule" '!done && $0 == rule {done=1; next} {print}' "$_f" > "$_f.tmp" && mv "$_f.tmp" "$_f"
+        exit 0
+        ;;
+    -X)
+        if [ ! -f "$(chain_file "$chain")" ]; then
+            echo "iptables: No chain/target/match by that name." >&2
+            exit 1
+        fi
+        for _ref in PREROUTING FORWARD; do
+            if grep -q -- "-j $chain" "$(chain_file "$_ref")" 2>/dev/null; then
+                echo "iptables: Can't delete chain with references." >&2
+                exit 1
+            fi
+        done
+        rm -f "$(chain_file "$chain")"
+        exit 0
+        ;;
+    -S)
+        if [ ! -f "$(chain_file "$chain")" ]; then
+            echo "iptables: No chain/target/match by that name." >&2
+            exit 1
+        fi
+        echo "-N $chain"
+        # 真实 iptables 的 -S 输出归一化：带 --dport 等匹配选项的规则会
+        # 在 -p udp/-p tcp 后插入 "-m udp"/"-m tcp"（2026-11-13 真机实测）；
+        # 无匹配选项的规则（如 -p tcp -j TPROXY）不插入。此归一化必须保留，
+        # 否则 verify.sh 的 DNS 检查误报在桩测里永远抓不到。注意：只改
+        # -S 的输出，状态文件里仍存规则原文，-D 按原文匹配不受影响。
+        sed "s/^/-A $chain /" "$(chain_file "$chain")" \
+            | sed -E 's/-p udp --dport/-p udp -m udp --dport/; s/-p tcp --dport/-p tcp -m tcp --dport/'
+        exit 0
+        ;;
+    -L)
+        if [ ! -f "$(chain_file "$chain")" ]; then
+            echo "iptables: No chain/target/match by that name." >&2
+            exit 1
+        fi
+        echo "Chain $chain (0 references)"
+        echo "target     prot opt source               destination"
+        cat "$(chain_file "$chain")"
+        exit 0
+        ;;
+esac
+echo "stub iptables: unsupported op: $op" >&2
+exit 1

@@ -1,0 +1,46 @@
+#!/bin/bash
+# stub wget：按 URL 模式把 fixture 拷到 -O 目标；未知 URL 失败。
+# fixture 目录由 STUB_FIXTURES 指定。
+S="${STUB_STATE:?STUB_STATE not set}"
+F="${STUB_FIXTURES:?STUB_FIXTURES not set}"
+out=""
+url=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-O" ]; then out="$a"; prev=""; continue; fi
+    case "$a" in
+        -O) prev="-O" ;;
+        -*) ;;  # -q/--show-progress/-T/--tries 等一律忽略
+        *) url="$a" ;;
+    esac
+done
+[ -n "$out" ] && [ -n "$url" ] || { echo "stub wget: missing -O or URL" >&2; exit 1; }
+case "$url" in
+    *mihomo-linux-*.gz)
+        if [ -f "$S/wget-fail-kernel" ]; then echo "stub wget: injected kernel failure" >&2; exit 4; fi
+        # 双源校验桩测：经本地代理（https_proxy=127.0.0.1:7890）的首选
+        # 下载恒返回正常包；直连/镜像（第二源）按标记返回差异包或失败。
+        if [ "${https_proxy:-}" != "http://127.0.0.1:7890" ]; then
+            if [ -f "$S/wget-kernel-second-differ" ]; then cp "$F/mihomo-alt.gz" "$out" && exit 0 || exit 1; fi
+            if [ -f "$S/wget-kernel-second-fail" ]; then echo "stub wget: injected second-source failure" >&2; exit 4; fi
+        fi
+        cp "$F/mihomo.gz" "$out" && exit 0 || exit 1
+        ;;
+    *compressed-dist.tgz)
+        cp "$F/ui.tgz" "$out" && exit 0 || exit 1
+        ;;
+    */geosite.dat)
+        cp "$F/GeoSite.dat" "$out" && exit 0 || exit 1
+        ;;
+    */geoip.dat)
+        cp "$F/GeoIP.dat" "$out" && exit 0 || exit 1
+        ;;
+    */country.mmdb)
+        cp "$F/Country.mmdb" "$out" && exit 0 || exit 1
+        ;;
+    */SHA256SUMS)
+        cp "$F/SHA256SUMS" "$out" && exit 0 || exit 1
+        ;;
+esac
+echo "stub wget: unhandled URL: $url" >&2
+exit 4

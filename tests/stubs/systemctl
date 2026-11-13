@@ -1,0 +1,120 @@
+#!/bin/bash
+# stub systemctl：模拟 mihomo 服务状态。start/restart/enable --now 会像
+# 真实 systemd 一样执行 ExecStartPost（运行 /etc/mihomo/tproxy.sh）；
+# tproxy.sh 失败则启动失败、服务保持 inactive。
+# stop/restart 时模拟 ExecStopPost：单元文件含 ExecStopPost … tproxy.sh
+# stop 时才执行清理（旧版单元无此行，停服务后规则残留——即 P1-13
+# 修复前的 bug，M13c 用它做对照）。
+# 故障注入：$STUB_STATE/drop-rules-after-start 存在时，启动成功后立刻
+# 清掉规则（一次性），模拟"服务健康但规则缺失"，供 M11e 使用。
+# 状态文件：$STUB_STATE/svc-active、svc-enabled、api-up（0/1）。
+S="${STUB_STATE:?STUB_STATE not set}"
+mkdir -p "$S"
+
+get() { cat "$S/$1" 2>/dev/null || echo 0; }
+set_state() { echo "$2" > "$S/$1"; }
+
+do_start() {
+    # 模拟 ExecStartPost：先跑 tproxy.sh，失败则服务启动失败
+    if [ -f /etc/mihomo/tproxy.sh ]; then
+        if ! bash /etc/mihomo/tproxy.sh; then
+            echo "stub systemctl: ExecStartPost tproxy.sh failed" >&2
+            set_state svc-active 0
+            set_state api-up 0
+            return 1
+        fi
+    fi
+    set_state svc-active 1
+    if [ -f "$S/api-fail" ]; then
+        set_state api-up 0
+    else
+        set_state api-up 1
+    fi
+    # 故障注入（一次性）：启动成功后清掉规则，模拟规则缺失
+    if [ -f "$S/drop-rules-after-start" ]; then
+        rm -f "$S/drop-rules-after-start"
+        if [ -f /etc/mihomo/tproxy.sh ]; then
+            bash /etc/mihomo/tproxy.sh stop >/dev/null 2>&1 || true
+        fi
+    fi
+    return 0
+}
+
+do_stop_post() {
+    # 模拟 ExecStopPost：只在已安装的单元文件含该指令时执行；
+    # 失败只记日志，不影响停止操作本身（与 systemd 行为一致）。
+    if [ -f /etc/systemd/system/mihomo.service ] \
+        && grep -q 'ExecStopPost.*tproxy.sh stop' /etc/systemd/system/mihomo.service 2>/dev/null \
+        && [ -f /etc/mihomo/tproxy.sh ]; then
+        bash /etc/mihomo/tproxy.sh stop || true
+    fi
+}
+
+# 去掉 --quiet / --no-pager 等全局修饰参数
+args=()
+for a in "$@"; do
+    case "$a" in
+        --quiet|--no-pager) ;;
+        *) args+=("$a") ;;
+    esac
+done
+set -- "${args[@]}"
+
+case "$1" in
+    --version)
+        echo "systemd 255 (stub)"
+        exit 0
+        ;;
+    is-active)
+        [ "$(get svc-active)" = "1" ]
+        ;;
+    is-enabled)
+        [ "$(get svc-enabled)" = "1" ]
+        ;;
+    stop)
+        do_stop_post
+        set_state svc-active 0
+        set_state api-up 0
+        exit 0
+        ;;
+    start)
+        do_start
+        exit $?
+        ;;
+    restart)
+        do_stop_post
+        set_state svc-active 0
+        set_state api-up 0
+        do_start
+        exit $?
+        ;;
+    enable)
+        set_state svc-enabled 1
+        if [ "$2" = "--now" ]; then
+            do_start
+            exit $?
+        fi
+        exit 0
+        ;;
+    disable)
+        set_state svc-enabled 0
+        exit 0
+        ;;
+    daemon-reload)
+        exit 0
+        ;;
+    status)
+        if [ "$(get svc-active)" = "1" ]; then
+            echo "● mihomo.service - Mihomo Daemon (stub)"
+            echo "   Active: active (running)"
+        else
+            echo "● mihomo.service - Mihomo Daemon (stub)"
+            echo "   Active: inactive (dead)"
+        fi
+        exit 0
+        ;;
+    *)
+        echo "stub systemctl: unsupported args: $*" >&2
+        exit 1
+        ;;
+esac
