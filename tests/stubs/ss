@@ -1,0 +1,25 @@
+#!/bin/bash
+# stub ss：模拟面板 9090 监听状态，供 verify.sh 第 7 节核对"配置监听
+# 地址与实际监听是否一致"用。只服务 ss -tln（其他参数一律失败）。
+#   默认按 /etc/mihomo/config.yaml 的 external-controller 报告监听
+#   （api-up=1 时，即服务在跑；api-up=0 时无输出，表示无监听）；
+#   $STUB_STATE/ss-listen-override 存在时报告其内容（监听地址不一致
+#   模拟，供 V18 用；内容如 0.0.0.0:9090）。
+# 输出格式按真实 ss -tln（表头 + LISTEN 行），verify.sh 按 $1=="LISTEN"
+# 且 $4 以 :9090 结尾解析。
+S="${STUB_STATE:?STUB_STATE not set}"
+case "$*" in
+    *"-tln"*) ;;
+    *) echo "stub ss: unsupported args: $*" >&2; exit 1 ;;
+esac
+[ "$(cat "$S/api-up" 2>/dev/null || echo 0)" = "1" ] || exit 0
+_listen=""
+if [ -f "$S/ss-listen-override" ]; then
+    _listen="$(cat "$S/ss-listen-override")"
+elif [ -f /etc/mihomo/config.yaml ]; then
+    _listen="$(grep -E '^external-controller:' /etc/mihomo/config.yaml | head -1 | sed -E 's/^external-controller:[[:space:]]*//' || true)"
+fi
+[ -n "$_listen" ] || exit 0
+echo "State   Recv-Q  Send-Q   Local Address:Port   Peer Address:Port"
+printf 'LISTEN  0       4096         %s               0.0.0.0:*\n' "$_listen"
+exit 0
