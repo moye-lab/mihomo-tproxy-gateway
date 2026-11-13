@@ -1,0 +1,64 @@
+#!/bin/bash
+# stub curl：只服务测试中出现的 URL，其他一律失败（避免静默通过）。
+#   */version        -> 按 $STUB_STATE/api-up 决定成功与否
+#   api.github.com   -> 返回固定 tag v1.19.32（除非 github-api-fail 存在）
+#   */generate_204   -> 204（auto-maintain 连通性探测用）
+#   */providers/proxies      -> provider 列表 JSON（形状按 2026-11-13 真机实测：
+#                                airport1/default/分组三个 provider，各带 proxies 数组，
+#                                无 count、无 subscriptionInfo；节点数不在这里数，
+#                                脚本数订阅缓存文件——别再把 count 加回来）
+#   */providers/proxies/*    -> 204（订阅刷新 PUT 用）
+S="${STUB_STATE:?STUB_STATE not set}"
+url="${!#}"
+# 代理模拟：真实 curl 默认会把 localhost 请求也发给 https_proxy（除非
+# --noproxy），而代理连不到本机的 127.0.0.1:9090。脚本里所有打本机 API
+# 的 curl 都必须带 --noproxy（2026-11-13 真机实测：回滚轮询被死代理
+# 毒化，30 秒轮询全败却误报 API 未就绪）。
+_has_noproxy=0
+for _a in "$@"; do [ "$_a" = "--noproxy" ] && _has_noproxy=1; done
+case "$url" in
+    *127.0.0.1*|*localhost*)
+        if [ "$_has_noproxy" -eq 0 ] && { [ -n "${https_proxy:-}" ] || [ -n "${http_proxy:-}" ] || [ -n "${HTTPS_PROXY:-}" ] || [ -n "${HTTP_PROXY:-}" ]; }; then
+            exit 7
+        fi
+        ;;
+esac
+case "$url" in
+    */version)
+        if [ -f "$S/api-fail" ]; then exit 7; fi
+        if [ "$(cat "$S/api-up" 2>/dev/null || echo 0)" = "1" ]; then
+            echo '{"version":"v1.19.32"}'
+            exit 0
+        fi
+        exit 7
+        ;;
+    *api.github.com/repos/MetaCubeX/mihomo/releases/latest)
+        if [ -f "$S/github-api-fail" ]; then exit 6; fi
+        # 与真实 GitHub API 一致的 pretty-printed JSON（每字段一行），
+        # 否则 grep '"tag_name"' 会命中整行、版本号被匹配两次。
+        printf '%s\n' '{' '  "tag_name": "v1.19.32",' '  "name": "v1.19.32"' '}'
+        exit 0
+        ;;
+    *generate_204)
+        # 调用方用 -w "%{http_code}" 取码；这里直接输出 204
+        printf '204'
+        exit 0
+        ;;
+    */providers/proxies)
+        if [ -f "$S/api-fail" ]; then exit 7; fi
+        if [ "$(cat "$S/api-up" 2>/dev/null || echo 0)" = "1" ]; then
+            # 真机实测形状（mihomo v1.19.34，2026-11-13）：3 个 provider，
+            # airport1 含 3 个节点；default 是内置出口，分组本身也算一个
+            # provider；无 count、无 subscriptionInfo 字段。
+            echo '{"providers":{"airport1":{"name":"airport1","type":"Proxy","vehicleType":"HTTP","proxies":[{"name":"node1"},{"name":"node2"},{"name":"node3"}],"updatedAt":"2026-11-13T12:00:00+08:00"},"default":{"name":"default","type":"Proxy","vehicleType":"Compatible","proxies":[{"name":"DIRECT"},{"name":"REJECT"}],"updatedAt":"2026-11-13T12:00:00+08:00"},"🚀 节点选择":{"name":"🚀 节点选择","type":"Proxy","vehicleType":"Compatible","proxies":[{"name":"⚡ 自动最优"}],"updatedAt":"2026-11-13T12:00:00+08:00"}}}'
+            exit 0
+        fi
+        exit 7
+        ;;
+    */providers/proxies/*)
+        printf '204'
+        exit 0
+        ;;
+esac
+echo "stub curl: unhandled URL: $url" >&2
+exit 6
