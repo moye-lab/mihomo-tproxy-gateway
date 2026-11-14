@@ -1,0 +1,11 @@
+# Mihomo 无人值守维护 —— 分三档，避免"一个脚本干所有事"导致高频任务
+# 也要背上下载 GeoIP、检查新版本这些慢操作。
+
+# 每 15 分钟：连通性探测，异常自动重启（自愈，最高频、最轻量）
+*/15 * * * * root /bin/bash /etc/mihomo/auto-maintain.sh check
+
+# 每天 03:00：刷新订阅（走 API，几秒完成）
+0 3 * * * root /bin/bash /etc/mihomo/auto-maintain.sh refresh
+
+# 每周日 03:30：完整维护（GeoIP/GeoSite 更新 + 内核版本检查升级 + 重启）
+30 3 * * 0 root /bin/bash /etc/mihomo/auto-maintain.sh full

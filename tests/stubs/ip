@@ -1,0 +1,200 @@
+#!/bin/bash
+# stub ip：带状态的 ip 命令桩，供 mihomo-tproxy-gateway P0 桩测使用。
+# 状态目录由 STUB_STATE 指定；支持 tproxy.sh / install.sh 用到的子命令：
+#   link show dev <iface> / rule show|add|del / route get|show|add|del /
+#   -o route show dev <iface> scope link / -o -4 addr show dev <iface>
+# 不支持的调用一律报错退出（避免测试在未模拟的行为上悄悄通过）。
+S="${STUB_STATE:?STUB_STATE not set}"
+mkdir -p "$S"
+touch "$S/ip-rules.txt" "$S/ip-route-100.txt" "$S/ifaces.txt"
+
+del_first_match() {
+    # del_first_match <文件> <ERE>：删除第一个匹配的行；无匹配返回 1
+    local file="$1" pat="$2"
+    local tmp="$file.tmp"
+    if ! grep -qE "$pat" "$file" 2>/dev/null; then
+        return 1
+    fi
+    awk -v pat="$pat" '!done && $0 ~ pat {done=1; next} {print}' "$file" > "$tmp" && mv "$tmp" "$file"
+    return 0
+}
+
+case "$1" in
+    link)
+        if [ "$2" = "show" ] && [ "$3" = "dev" ]; then
+            if grep -qx "$4" "$S/ifaces.txt" 2>/dev/null; then
+                echo "2: $4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP"
+                exit 0
+            fi
+            echo "Device \"$4\" does not exist." >&2
+            exit 1
+        fi
+        ;;
+    rule)
+        case "$2" in
+            show)
+                cat "$S/ip-rules.txt" 2>/dev/null
+                exit 0
+                ;;
+            add)
+                # ip rule add fwmark <mark> table <table>
+                if [ -f "$S/ip-rule-add-fail-once" ]; then
+                    rm -f "$S/ip-rule-add-fail-once"
+                    echo "RTNETLINK answers: Invalid argument (injected one-shot failure)" >&2
+                    exit 2
+                fi
+                _mark=""; _table=""
+                shift 2
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        fwmark) _mark="$2"; shift 2 ;;
+                        table)  _table="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                if grep -qE "fwmark 0x${_mark}([ /]|$).*lookup ${_table}$" "$S/ip-rules.txt" 2>/dev/null; then
+                    echo "RTNETLINK answers: File exists" >&2
+                    exit 2
+                fi
+                printf '32765: from all fwmark 0x%s lookup %s\n' "$_mark" "$_table" >> "$S/ip-rules.txt"
+                exit 0
+                ;;
+            del)
+                # ip rule del fwmark <mark> table <table>：删一条匹配的，无则失败
+                _mark=""; _table=""
+                shift 2
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        fwmark) _mark="$2"; shift 2 ;;
+                        table)  _table="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                if del_first_match "$S/ip-rules.txt" "fwmark 0x${_mark}([ /]|$).*lookup ${_table}$"; then
+                    exit 0
+                fi
+                echo "RTNETLINK answers: No such file or directory" >&2
+                exit 2
+                ;;
+        esac
+        ;;
+    route)
+        case "$2" in
+            get)
+                # ip route get 1.1.1.1：$7 必须是本机 IP（install.sh 取 $7）
+                # 故障注入：$STUB_STATE/public-ip 存在时，本机 IP 为公网地址
+                if [ -f "$S/public-ip" ]; then
+                    echo "203.0.113.1 via 203.0.113.254 dev eth0 src 203.0.113.5 uid 0"
+                else
+                    echo "1.1.1.1 via 10.0.0.1 dev eth0 src 10.0.0.201 uid 0"
+                fi
+                exit 0
+                ;;
+            show)
+                if [ "$3" = "default" ]; then
+                    echo "default via 10.0.0.1 dev eth0 proto dhcp metric 100"
+                    exit 0
+                fi
+                if [ "$3" = "table" ]; then
+                    cat "$S/ip-route-$4.txt" 2>/dev/null
+                    exit 0
+                fi
+                ;;
+            add)
+                # ip route add local default dev lo table 100
+                if grep -qx "local default dev lo scope host" "$S/ip-route-100.txt" 2>/dev/null; then
+                    echo "RTNETLINK answers: File exists" >&2
+                    exit 2
+                fi
+                echo "local default dev lo scope host" >> "$S/ip-route-100.txt"
+                exit 0
+                ;;
+            del)
+                # ip route del local default dev lo table 100
+                if del_first_match "$S/ip-route-100.txt" '^local default dev lo'; then
+                    exit 0
+                fi
+                echo "RTNETLINK answers: No such file or directory" >&2
+                exit 2
+                ;;
+        esac
+        ;;
+    -o)
+        # ip -o -4 addr show dev <iface>：按网卡返回其 IPv4 地址（install.sh
+        # 取 $4 再去前缀；public-ip 标记存在时 eth0 为公网地址，与 route
+        # get 一致；public-ip-eth1 标记存在时 eth1 为公网地址，供 P7i 用）。
+        if [[ "$*" == *"addr show"* ]]; then
+            _dev=""
+            _prev=""
+            for _a in "$@"; do
+                if [ "$_prev" = "dev" ]; then _dev="$_a"; break; fi
+                _prev="$_a"
+            done
+            case "$_dev" in
+                eth0)
+                    if [ -f "$S/public-ip" ]; then echo "2: eth0    inet 203.0.113.5/24 brd 203.0.113.255 scope global eth0";
+                    else echo "2: eth0    inet 10.0.0.201/24 brd 10.0.0.255 scope global eth0"; fi
+                    ;;
+                eth1)
+                    if [ -f "$S/public-ip-eth1" ]; then echo "3: eth1    inet 203.0.113.6/24 brd 203.0.113.255 scope global eth1";
+                    else echo "3: eth1    inet 192.168.5.2/24 brd 192.168.5.255 scope global eth1"; fi
+                    ;;
+                docker0) echo "4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0" ;;
+                *) ;;
+            esac
+            exit 0
+        fi
+        # ip -o route show dev <iface> scope link：按网卡返回其直连网段
+        _dev=""
+        _prev=""
+        for _a in "$@"; do
+            if [ "$_prev" = "dev" ]; then _dev="$_a"; break; fi
+            _prev="$_a"
+        done
+        case "$_dev" in
+            eth0) echo "10.0.0.0/24 dev eth0 proto kernel scope link src 10.0.0.201" ;;
+            eth1) echo "192.168.5.0/24 dev eth1 proto kernel scope link src 192.168.5.2" ;;
+            docker0) echo "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1" ;;
+            *) ;;
+        esac
+        exit 0
+        ;;
+    -6)
+        # IPv6 查询（P1-8）：默认系统"未启用 IPv6"（与真实无 IPv6 内核
+        # 一样报错退出）；$STUB_STATE/ipv6-enabled 存在时视为已启用，
+        # $STUB_STATE/ipv6-lan 存在时 LAN 口有全局 IPv6 地址。
+        if [ "$2" = "addr" ] && [ "$3" = "show" ]; then
+            if [ -f "$S/ipv6-enabled" ]; then
+                echo "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN"
+                echo "    inet6 ::1/128 scope host"
+                exit 0
+            fi
+            echo "RTNETLINK answers: Address family not supported by protocol" >&2
+            exit 1
+        fi
+        if [ "$2" = "-o" ] && [ "$3" = "addr" ] && [ "$4" = "show" ]; then
+            # 前缀覆盖：$STUB_STATE/ipv6-lan-prefix 存在时用其内容作 LAN
+            # 口全局前缀（前缀变更/重编号模拟，M18d 用），默认固定前缀。
+            _v6pfx="2408:8207:1234:5678::5/64"
+            [ -f "$S/ipv6-lan-prefix" ] && _v6pfx="$(cat "$S/ipv6-lan-prefix")"
+            if [ -f "$S/ipv6-lan" ]; then
+                echo "2: eth0    inet6 ${_v6pfx} scope global dynamic mngtmpaddr"
+            elif [ -f "$S/ipv6-lan-delayed" ]; then
+                # 延迟出现（开机时序模拟）：文件内存活计数，每次查询减 1，
+                # 归零后地址出现并粘住（转存为 ipv6-lan）。
+                _n="$(cat "$S/ipv6-lan-delayed" 2>/dev/null || echo 0)"
+                _n=$((_n - 1))
+                if [ "$_n" -le 0 ]; then
+                    rm -f "$S/ipv6-lan-delayed"
+                    touch "$S/ipv6-lan"
+                    echo "2: eth0    inet6 ${_v6pfx} scope global dynamic mngtmpaddr"
+                else
+                    printf '%s' "$_n" > "$S/ipv6-lan-delayed"
+                fi
+            fi
+            exit 0
+        fi
+        ;;
+esac
+echo "stub ip: unsupported args: $*" >&2
+exit 1

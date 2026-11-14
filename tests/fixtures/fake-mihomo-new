@@ -1,0 +1,28 @@
+#!/bin/bash
+# fixture: 假 mihomo 新版二进制（v1.19.32，含 NEW-BINARY-MARKER 供测试识别）
+# NEW-BINARY-MARKER
+S="${STUB_STATE:-/nonexistent}"
+if [ "$1" = "-v" ]; then
+    echo "Mihomo Meta v1.19.32 linux amd64 with go1.23.0"
+    exit 0
+fi
+if [ "$1" = "-t" ]; then
+    if [ -f "$S/mihomo-t-fail" ]; then
+        echo "fake: configuration test failed (injected)" >&2
+        exit 1
+    fi
+    dir=""
+    prev=""
+    for a in "$@"; do
+        if [ "$prev" = "-d" ]; then dir="$a"; fi
+        prev="$a"
+    done
+    if [ -f "$dir/config.yaml" ]; then
+        echo "configuration test is successful"
+        exit 0
+    fi
+    echo "fake: no config.yaml in $dir" >&2
+    exit 1
+fi
+echo "fake mihomo: unknown args: $*" >&2
+exit 1
