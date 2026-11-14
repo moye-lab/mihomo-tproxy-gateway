@@ -1,0 +1,163 @@
+#!/bin/bash
+# stub curl：只服务测试中出现的 URL，其他一律失败（避免静默通过）。
+#   */version        -> 按 $STUB_STATE/api-up 决定成功与否
+#   api.github.com   -> 返回固定 tag v1.19.32（除非 github-api-fail 存在）
+#   Gitea 资产仓 API（git.edge97.dpdns.org/api/v1/repos/sg/mihomo-assets/
+#   releases/latest）-> 返回固定 tag v1.0.2（除非 gitea-api-fail 存在，
+#   存在时 exit 6，模拟最新批次查询失败）。固定 tag 必须与钉版 v1.0.1
+#   不同，否则 wget 桩的 wget-fail-latest-batch 标记分不清最新批次与
+#   钉版（见该桩头注释）。第二轮第 6 项 P10b/P10c 用。
+#   */generate_204   -> 204（auto-maintain 连通性探测用）
+#   */providers/proxies      -> provider 列表 JSON（形状按 2026-11-13 真机实测：
+#                                airport1/default/分组三个 provider，各带 proxies 数组，
+#                                无 count、无 subscriptionInfo；节点数不在这里数，
+#                                脚本数订阅缓存文件——别再把 count 加回来）
+#   */providers/proxies/*    -> 204（订阅刷新 PUT 用）
+#   file://*                 -> 读本地文件输出（不存在则 exit 37，与真
+#                                curl 一致；check-release.sh 的 C 组桩测
+#                                用 file:// 假 API 模拟 GitHub Release）
+# 面板访问模拟（第二轮第 2 项，P9 访问测试用）：URL 指向 :9090 且宿主
+# 为 IPv4 时，先模拟内核的两层判断再决定是否可达——① 监听：读
+# /etc/mihomo/config.yaml 的 external-controller，只绑 127.0.0.1 时非
+# 本机目标直接拒绝，只绑某 LAN IP 时其他地址拒绝，0.0.0.0 服务全部
+# 地址；② 防火墙：仅当 $STUB_STATE/curl-source-ip 标记存在时模拟（该
+# 标记表示"远端客户端"，按 MIHOMO_PANEL 链内规则逐条评估该来源；命中
+# DROP 即拒绝，命中 RETURN 即放行，链走完未命中按 INPUT 默认 ACCEPT
+# 放行）。无标记时不模拟防火墙——桩的所有 curl 调用都来自本机进程，
+# 本机进程连本机 IP 只走 OUTPUT 链、不进 INPUT，面板防火墙对其不生效
+# （若模拟了它，重装换网段后本机 API 轮询会被误拦，I3 实测）。局限：
+# 这是桩对内核 INPUT/filter 行为的模拟，不是真实数据包；真实包过滤
+# 效果仍需真机验证（见 P9h 注释）。
+S="${STUB_STATE:?STUB_STATE not set}"
+url="${!#}"
+# 代理模拟：真实 curl 默认会把 localhost 请求也发给 https_proxy（除非
+# --noproxy），而代理连不到本机的 127.0.0.1:9090。脚本里所有打本机 API
+# 的 curl 都必须带 --noproxy（2026-11-13 真机实测：回滚轮询被死代理
+# 毒化，30 秒轮询全败却误报 API 未就绪）。
+_has_noproxy=0
+for _a in "$@"; do [ "$_a" = "--noproxy" ] && _has_noproxy=1; done
+case "$url" in
+    *127.0.0.1*|*localhost*)
+        if [ "$_has_noproxy" -eq 0 ] && { [ -n "${https_proxy:-}" ] || [ -n "${http_proxy:-}" ] || [ -n "${HTTPS_PROXY:-}" ] || [ -n "${HTTP_PROXY:-}" ]; }; then
+            exit 7
+        fi
+        ;;
+esac
+# IPv4 是否在 CIDR 内（纯 bash 位运算；网段/地址含前导 0 时不认，
+# 调用方只传校验过的 CIDR 与测试标记的源地址）。
+ip_in_cidr() { # ip_in_cidr <ip> <cidr>
+    local _ip="$1" _cidr="$2" _net="${2%/*}" _pfx="${2#*/}"
+    local _a _b _c _d _na _nb _nc _nd _ipn _netn _mask
+    case "$_pfx" in ''|*[!0-9]*) return 1 ;; esac
+    IFS='.' read -r _a _b _c _d <<< "$_ip"
+    IFS='.' read -r _na _nb _nc _nd <<< "$_net"
+    case "$_a$_b$_c$_d$_na$_nb$_nc$_nd" in ''|*[!0-9]*) return 1 ;; esac
+    _ipn=$(( (_a << 24) + (_b << 16) + (_c << 8) + _d ))
+    _netn=$(( (_na << 24) + (_nb << 16) + (_nc << 8) + _nd ))
+    _mask=$(( (0xFFFFFFFF << (32 - _pfx)) & 0xFFFFFFFF ))
+    [ $(( _ipn & _mask )) -eq $(( _netn & _mask )) ]
+}
+# 面板访问模拟（见文件头）：模拟通过返回 0，拒绝返回 1。
+panel_access_ok() { # panel_access_ok <url>
+    local _url="$1" _host="" _listen="" _src="" _line _cidr
+    case "$_url" in
+        http://*:9090/*) ;;
+        *) return 0 ;;
+    esac
+    _host=$(printf '%s' "$_url" | sed -E 's#^http://([^:/]+).*#\1#')
+    case "$_host" in
+        localhost) _host="127.0.0.1" ;;
+        *.*.*.*) ;;
+        *) return 0 ;;  # 非 IP 宿主（域名）不模拟
+    esac
+    [ -f /etc/mihomo/config.yaml ] || return 0
+    _listen=$(grep -E '^external-controller:' /etc/mihomo/config.yaml | head -1 | sed -E 's/^external-controller:[[:space:]]*([^:]+):.*/\1/' || true)
+    [ -n "$_listen" ] || _listen="127.0.0.1"
+    # ① 监听：0.0.0.0 服务全部地址；否则目标必须等于监听地址。
+    if [ "$_listen" != "0.0.0.0" ] && [ "$_host" != "$_listen" ]; then
+        return 1
+    fi
+    # ② 防火墙：无来源标记即本机发起的连接（安装轮询/自检/维护 API），
+    # 本机进程连本机 IP 只走 OUTPUT 链、不进 INPUT，跳过模拟；有标记
+    # 时按该来源评估 MIHOMO_PANEL 链（远端客户端模拟，见文件头）。
+    [ -f "$S/curl-source-ip" ] || return 0
+    if ! grep -q -- '-j MIHOMO_PANEL' "$S/ipt-filter-INPUT.txt" 2>/dev/null; then
+        return 0
+    fi
+    _src="$(cat "$S/curl-source-ip")"
+    while IFS= read -r _line; do
+        case "$_line" in
+            *"-i lo -j RETURN"*)
+                [ "$_src" = "127.0.0.1" ] && return 0
+                ;;
+            *"-s "*" -j RETURN"*)
+                _cidr=$(printf '%s' "$_line" | sed -E 's/.*-s ([0-9./]+) -j RETURN.*/\1/')
+                if ip_in_cidr "$_src" "$_cidr"; then return 0; fi
+                ;;
+            *"-j DROP"*) return 1 ;;
+            *"-j RETURN"*) return 0 ;;
+        esac
+    done < "$S/ipt-filter-MIHOMO_PANEL.txt" 2>/dev/null
+    return 0
+}
+if ! panel_access_ok "$url"; then exit 7; fi
+case "$url" in
+    */version)
+        if [ -f "$S/api-fail" ]; then exit 7; fi
+        if [ "$(cat "$S/api-up" 2>/dev/null || echo 0)" = "1" ]; then
+            echo '{"version":"v1.19.32"}'
+            exit 0
+        fi
+        exit 7
+        ;;
+    *api.github.com/repos/MetaCubeX/mihomo/releases/latest)
+        if [ -f "$S/github-api-fail" ]; then exit 6; fi
+        # 与真实 GitHub API 一致的 pretty-printed JSON（每字段一行），
+        # 否则 grep '"tag_name"' 会命中整行、版本号被匹配两次。
+        printf '%s\n' '{' '  "tag_name": "v1.19.32",' '  "name": "v1.19.32"' '}'
+        exit 0
+        ;;
+    *api/v1/repos/sg/mihomo-assets/releases/latest)
+        # 专用资产仓最新批次查询（install.sh resolve_fallback_tag 用）。
+        # 固定返回 v1.0.2：一个比钉版 v1.0.1 新的批次，桩不区分"哪个
+        # 批次更新"，只要求它不等于钉版（见文件头）。gitea-api-fail
+        # 标记模拟 API 不可达：exit 6，调用方 tag 为空、直接走钉版。
+        if [ -f "$S/gitea-api-fail" ]; then exit 6; fi
+        printf '%s\n' '{' '  "tag_name": "v1.0.2",' '  "name": "v1.0.2"' '}'
+        exit 0
+        ;;
+    *generate_204)
+        # 调用方用 -w "%{http_code}" 取码；这里直接输出 204
+        printf '204'
+        exit 0
+        ;;
+    */providers/proxies)
+        if [ -f "$S/api-fail" ]; then exit 7; fi
+        if [ "$(cat "$S/api-up" 2>/dev/null || echo 0)" = "1" ]; then
+            # 真机实测形状（mihomo v1.19.34，2026-11-13）：3 个 provider，
+            # airport1 含 3 个节点；default 是内置出口，分组本身也算一个
+            # provider；无 count、无 subscriptionInfo 字段。
+            echo '{"providers":{"airport1":{"name":"airport1","type":"Proxy","vehicleType":"HTTP","proxies":[{"name":"node1"},{"name":"node2"},{"name":"node3"}],"updatedAt":"2026-11-13T12:00:00+08:00"},"default":{"name":"default","type":"Proxy","vehicleType":"Compatible","proxies":[{"name":"DIRECT"},{"name":"REJECT"}],"updatedAt":"2026-11-13T12:00:00+08:00"},"🚀 节点选择":{"name":"🚀 节点选择","type":"Proxy","vehicleType":"Compatible","proxies":[{"name":"⚡ 自动最优"}],"updatedAt":"2026-11-13T12:00:00+08:00"}}}'
+            exit 0
+        fi
+        exit 7
+        ;;
+    */providers/proxies/*)
+        printf '204'
+        exit 0
+        ;;
+    file://*)
+        # 真 curl 能读 file:// URL；check-release.sh 的桩测（C 组）用
+        # file:// 假 API 模拟 GitHub Release 响应。文件可读则输出内容，
+        # 否则 exit 37（与真 curl 打不开文件时的退出码一致）。
+        _f="${url#file://}"
+        if [ -f "$_f" ] && [ -r "$_f" ]; then
+            cat "$_f"
+            exit 0
+        fi
+        echo "stub curl: cannot open file: $_f" >&2
+        exit 37
+        ;;
+esac
+echo "stub curl: unhandled URL: $url" >&2
+exit 6

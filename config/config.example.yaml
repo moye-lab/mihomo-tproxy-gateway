@@ -1,0 +1,155 @@
+mixed-port: 7890
+tproxy-port: 7893
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: warning
+ipv6: false
+
+external-controller: 127.0.0.1:9090
+external-ui: /etc/mihomo/ui
+# install.sh 会自动生成一个随机 secret 替换这里，不要留空。
+# 面板默认只监听本机（127.0.0.1:9090）；安装时可选局域网访问（绑定
+# LAN 口真实 IP）或全部接口（0.0.0.0:9090）。注意 0.0.0.0 会同时绑
+# 定 WAN/公网接口，不只是"局域网内"——选它时务必确认防火墙来源限制
+# 已生效（安装器会自动建 MIHOMO_PANEL 链限制为受管 LAN 网段），且
+# 绝不要把 9090 端口映射到公网。
+secret: "CHANGE_ME_SECRET"
+
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.0/15
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "+.stun.*.*"
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  proxy-server-nameserver:
+    - https://1.1.1.1/dns-query
+  nameserver-policy:
+    "geosite:cn": [223.5.5.5, 119.29.29.29]
+
+proxy-providers:
+  airport1:
+    type: http
+    url: "YOUR_SUBSCRIPTION_URL_1"
+    interval: 86400
+    path: ./providers/airport1.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+  # 需要第二个机场做备用/分组，可以照抄这一段改名 airport2，
+  # 然后在下面 proxy-groups 的 use 列表里加上 airport2 即可。
+
+proxy-groups:
+  - name: "🚀 节点选择"
+    type: select
+    proxies:
+      - "⚡ 自动最优"
+    use:
+      - airport1
+  - name: "⚡ 自动最优"
+    type: url-test
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+    use:
+      - airport1
+  # 以下四个分流组默认都走"自动最优"（延迟最低的节点），想固定走某个
+  # 节点时在面板里点开对应分组手动选。每个分组都能在面板里单独切换，
+  # 互不影响：比如 AI 走美国节点、流媒体走香港节点。
+  - name: "🤖 AI 服务"
+    type: select
+    proxies:
+      - "⚡ 自动最优"
+      - "🚀 节点选择"
+    use:
+      - airport1
+  - name: "📺 流媒体"
+    type: select
+    proxies:
+      - "⚡ 自动最优"
+      - "🚀 节点选择"
+    use:
+      - airport1
+  - name: "💬 社交媒体"
+    type: select
+    proxies:
+      - "⚡ 自动最优"
+      - "🚀 节点选择"
+    use:
+      - airport1
+  - name: "🎮 游戏平台"
+    type: select
+    proxies:
+      - "⚡ 自动最优"
+      - "🚀 节点选择"
+    use:
+      - airport1
+
+# 规则按顺序匹配，先匹配到的先生效。顺序说明：
+# 私网直连 → 广告拦截 → 四个分流组 → 国内直连 → 兜底走节点选择。
+rules:
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - GEOSITE,private,DIRECT
+  # 广告与追踪域名直接拒绝（不走代理也不直连）。如果某个网站因此打不开，
+  # 删掉这一行即可。
+  - GEOSITE,category-ads-all,REJECT
+  # AI 服务：ChatGPT、Claude、Gemini、DeepSeek、Perplexity 等（category-ai-!cn
+  # 是 geodata 里汇总的非中国 AI 服务分类，一个规则全覆盖）。
+  - GEOSITE,category-ai-!cn,🤖 AI 服务
+  # 流媒体：视频与音乐服务。
+  - GEOSITE,youtube,📺 流媒体
+  - GEOSITE,netflix,📺 流媒体
+  - GEOSITE,disney,📺 流媒体
+  - GEOSITE,hbo,📺 流媒体
+  - GEOSITE,hulu,📺 流媒体
+  - GEOSITE,primevideo,📺 流媒体
+  - GEOSITE,apple-tvplus,📺 流媒体
+  - GEOSITE,spotify,📺 流媒体
+  - GEOSITE,tidal,📺 流媒体
+  - GEOSITE,twitch,📺 流媒体
+  - GEOSITE,dazn,📺 流媒体
+  - GEOSITE,abema,📺 流媒体
+  # 社交媒体与即时通讯。
+  - GEOSITE,telegram,💬 社交媒体
+  - GEOSITE,twitter,💬 社交媒体
+  - GEOSITE,x,💬 社交媒体
+  - GEOSITE,facebook,💬 社交媒体
+  - GEOSITE,instagram,💬 社交媒体
+  - GEOSITE,whatsapp,💬 社交媒体
+  - GEOSITE,discord,💬 社交媒体
+  - GEOSITE,reddit,💬 社交媒体
+  - GEOSITE,tiktok,💬 社交媒体
+  - GEOSITE,threads,💬 社交媒体
+  - GEOSITE,bluesky,💬 社交媒体
+  # 游戏平台与发行商（客户端登录、商店、更新走代理；游戏内联机流量
+  # 走不走代理取决于游戏本身的连接方式，不在此列）。
+  - GEOSITE,steam,🎮 游戏平台
+  - GEOSITE,epicgames,🎮 游戏平台
+  - GEOSITE,blizzard,🎮 游戏平台
+  - GEOSITE,riot,🎮 游戏平台
+  - GEOSITE,pubg,🎮 游戏平台
+  - GEOSITE,roblox,🎮 游戏平台
+  - GEOSITE,nintendo,🎮 游戏平台
+  - GEOSITE,playstation,🎮 游戏平台
+  - GEOSITE,xbox,🎮 游戏平台
+  - GEOSITE,rockstar,🎮 游戏平台
+  - GEOSITE,ubisoft,🎮 游戏平台
+  - GEOSITE,ea,🎮 游戏平台
+  - GEOSITE,origin,🎮 游戏平台
+  - GEOSITE,gog,🎮 游戏平台
+  - GEOSITE,garena,🎮 游戏平台
+  - GEOSITE,wargaming,🎮 游戏平台
+  - GEOSITE,cn,DIRECT
+  - GEOIP,CN,DIRECT,no-resolve
+  - MATCH,🚀 节点选择
