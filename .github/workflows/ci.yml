@@ -1,0 +1,140 @@
+# mihomo-tproxy-gateway CI：每次提交自动执行静态检查与桩测全套件。
+#
+# 已在 GitHub 上真实跑通：v1.2.0 run 43394957808、v1.2.1 两 run
+# 43435791038 与 43435786023（push + tag），7 步全部 success。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装检查工具
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck python3-yaml
+
+      - name: ShellCheck（-S warning 零告警）
+        run: |
+          shellcheck -S warning scripts/*.sh tests/run-tests.sh \
+            tests/check-release.sh \
+            tests/stubs/curl tests/stubs/ip tests/stubs/iptables \
+            tests/stubs/mihomo tests/stubs/systemctl tests/stubs/wget \
+            tests/stubs/ss tests/stubs/apt-get
+
+      - name: Bash 语法检查
+        run: |
+          for f in scripts/*.sh tests/run-tests.sh \
+              tests/check-release.sh \
+              tests/stubs/curl tests/stubs/ip tests/stubs/iptables \
+              tests/stubs/mihomo tests/stubs/systemctl tests/stubs/wget \
+              tests/stubs/ss tests/stubs/apt-get; do
+            bash -n "$f" || exit 1
+          done
+
+      - name: 配置模板检查
+        run: |
+          python3 - <<'PYEOF'
+          import yaml
+          with open("config/config.example.yaml") as f:
+              cfg = yaml.safe_load(f)
+          required = ["mixed-port", "tproxy-port", "allow-lan",
+                      "external-controller", "external-ui", "secret",
+                      "dns", "proxy-providers", "proxy-groups", "rules"]
+          missing = [k for k in required if k not in cfg]
+          assert not missing, f"模板缺必需键：{missing}"
+          assert cfg["secret"] == "CHANGE_ME_SECRET", \
+              "模板 secret 必须是占位符 CHANGE_ME_SECRET，不能是真实密钥"
+          assert cfg["proxy-providers"]["airport1"]["url"] == \
+              "YOUR_SUBSCRIPTION_URL_1", "模板订阅链接必须是占位符"
+          assert cfg["tproxy-port"] == 7893, "模板 tproxy-port 须为 7893"
+          assert cfg["dns"]["listen"] == "0.0.0.0:1053", \
+              "模板 dns.listen 须为 0.0.0.0:1053"
+          print("配置模板检查通过：合法 YAML，必需键齐全，占位符原样")
+          PYEOF
+
+      - name: 桩测全套件
+        run: sudo bash tests/run-tests.sh
+
+      - name: 架构资产一致性检查
+        run: |
+          python3 - <<'PYEOF'
+          import json, re
+          install = open("scripts/install.sh").read()
+          restore = open("scripts/restore.sh").read()
+          maintain = open("scripts/auto-maintain.sh").read()
+          # 只认 case 分支里的映射（x86_64)  BIN_ARCH="amd64"），不认
+          # maintain.env 渲染行的 BIN_ARCH="${BIN_ARCH}"。
+          def archs(text):
+              return set(re.findall(r'\)\s*BIN_ARCH="([^"]+)"', text))
+          ia, ra = archs(install), archs(restore)
+          assert ia == ra, f"install/restore 架构映射不一致：{ia} vs {ra}"
+          assert ia == {"amd64", "arm64", "armv7"}, f"架构清单非预期：{ia}"
+          assert "mihomo-linux-${BIN_ARCH}-" in maintain, \
+              "auto-maintain 未用 BIN_ARCH 拼内核名"
+          m = json.load(open("assets/manifest.json"))
+          sums = {}
+          for line in open("assets/SHA256SUMS"):
+              h, f = line.split()
+              sums[f] = h
+          assert sum(a["size_bytes"] for a in m["assets"]) == \
+              m["total_size_bytes"], "manifest total_size_bytes 不一致"
+          assert set(sums) == {a["filename"] for a in m["assets"]}, \
+              "SHA256SUMS 文件名集合与 manifest 不一致"
+          for a in m["assets"]:
+              assert sums[a["filename"]] == a["sha256"], \
+                  f"哈希不一致：{a['filename']}"
+          for arch in sorted(ia):
+              assert f"mihomo-linux-{arch}.gz" in sums, f"清单缺 {arch} 内核"
+          print(f"架构资产一致：{sorted(ia)}，manifest/SHA256SUMS 一致")
+          PYEOF
+
+      - name: 敏感信息扫描
+        run: |
+          set -e
+          echo "--- 密钥/令牌字面量扫描（全仓，排除 .git）---"
+          if grep -rInE 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{20,}' --exclude-dir=.git .; then
+            echo "错误：发现疑似真实密钥/令牌字面量" >&2
+            exit 1
+          fi
+          echo "--- URL 内嵌凭证扫描 ---"
+          if grep -rInE 'https?://[^/[:space:]]+:[^/[:space:]@]+@' --exclude-dir=.git .; then
+            echo "错误：发现 URL 内嵌凭证" >&2
+            exit 1
+          fi
+          echo "--- 非测试代码中的 token= 字面量扫描 ---"
+          # tests/ 排除：桩测种子用假令牌（OLD123/NEW9/abc 等示例值），
+          # 不是真实凭证；非测试代码里出现 token= 一律视为可疑。
+          if grep -rInE 'token=[A-Za-z0-9]' --exclude-dir=.git --exclude-dir=tests .; then
+            echo "错误：非测试代码含 token= 字面量" >&2
+            exit 1
+          fi
+          echo "敏感信息扫描通过"
+
+      - name: 项目文件一致性检查
+        run: |
+          set -e
+          echo "--- install.sh/restore.sh 拷贝的文件必须存在 ---"
+          for f in scripts/tproxy.sh scripts/auto-maintain.sh scripts/verify.sh \
+              systemd/mihomo.service cron/mihomo-maintain.cron \
+              config/config.example.yaml assets/SHA256SUMS assets/manifest.json; do
+            test -f "$f" || { echo "错误：缺失 $f" >&2; exit 1; }
+          done
+          echo "--- cron/systemd 文件必须被安装与恢复脚本引用 ---"
+          for f in systemd/mihomo.service cron/mihomo-maintain.cron; do
+            grep -q "$f" scripts/install.sh || { echo "错误：install.sh 未引用 $f" >&2; exit 1; }
+            grep -q "$f" scripts/restore.sh || { echo "错误：restore.sh 未引用 $f" >&2; exit 1; }
+          done
+          echo "--- 配置模板与校验清单必须被引用 ---"
+          grep -q 'config/config.example.yaml' scripts/install.sh || { echo "错误：install.sh 未引用配置模板" >&2; exit 1; }
+          grep -q 'SHA256SUMS' scripts/install.sh || { echo "错误：install.sh 未引用 SHA256SUMS" >&2; exit 1; }
+          grep -q 'SHA256SUMS' scripts/restore.sh || { echo "错误：restore.sh 未引用 SHA256SUMS" >&2; exit 1; }
+          echo "--- 卸载脚本引用的恢复脚本必须存在 ---"
+          grep -q 'restore.sh' scripts/uninstall.sh || { echo "错误：uninstall.sh 未引用 restore.sh" >&2; exit 1; }
+          test -f scripts/restore.sh || { echo "错误：缺失 scripts/restore.sh" >&2; exit 1; }
+          echo "项目文件一致性检查通过"

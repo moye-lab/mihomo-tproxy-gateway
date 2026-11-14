@@ -1,0 +1,90 @@
+#!/bin/bash
+# stub wget：按 URL 模式把 fixture 拷到 -O 目标；未知 URL 失败。
+# fixture 目录由 STUB_FIXTURES 指定。
+# 兜底资产 URL 也按模式服务：钉版/最新批次的 ui.tgz、GeoSite.dat、
+# GeoIP.dat、country.mmdb 与 mihomo-linux-*.gz 都按文件名映射到同名
+# fixture（与官方 URL 共用同一套 case；大小写敏感：官方地数据远程名
+# 是小写的 geosite.dat/geoip.dat，资产仓 bundle 名是大写的 GeoSite.dat/
+# GeoIP.dat，两套 pattern 都要有）。
+# 故障注入标记（$STUB_STATE 下的空文件）：
+#   wget-fail-kernel：全部内核 URL 失败（旧标记，现无测试用，保留）。
+#   wget-fail-official：官方源（github.com / githubproxy.cc）全部失败，
+#     模拟"断官方源"，迫使安装走专用资产仓兜底；资产仓 URL 不受影响。
+#   wget-fail-latest-batch：资产仓最新批次下载失败——URL 在
+#     /sg/mihomo-assets/releases/download/ 下且 tag 不是钉版 v1.0.1
+#     时失败；钉版 URL 不受影响。模拟最新批次拉不到，迫使
+#     fetch_from_project 退回钉版（第二轮第 6 项 P10b 用）。
+#   wget-kernel-second-differ / wget-kernel-second-fail：双源校验用
+#     （见 mihomo-linux case 内注释）。
+S="${STUB_STATE:?STUB_STATE not set}"
+F="${STUB_FIXTURES:?STUB_FIXTURES not set}"
+out=""
+url=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-O" ]; then out="$a"; prev=""; continue; fi
+    case "$a" in
+        -O) prev="-O" ;;
+        -*) ;;  # -q/--show-progress/-T/--tries 等一律忽略
+        *) url="$a" ;;
+    esac
+done
+[ -n "$out" ] && [ -n "$url" ] || { echo "stub wget: missing -O or URL" >&2; exit 1; }
+# 兜底路径故障注入（标记含义见文件头；放 case 分发之前，对全部产物生效）。
+if [ -f "$S/wget-fail-official" ]; then
+    case "$url" in
+        *github.com*|*githubproxy.cc*) echo "stub wget: injected official-source failure" >&2; exit 4 ;;
+    esac
+fi
+if [ -f "$S/wget-fail-latest-batch" ]; then
+    case "$url" in
+        */sg/mihomo-assets/releases/download/*)
+            case "$url" in
+                */releases/download/v1.0.1/*) ;;
+                *) echo "stub wget: injected latest-batch failure" >&2; exit 4 ;;
+            esac
+            ;;
+    esac
+fi
+case "$url" in
+    *mihomo-linux-*.gz)
+        if [ -f "$S/wget-fail-kernel" ]; then echo "stub wget: injected kernel failure" >&2; exit 4; fi
+        # 双源校验桩测：经本地代理（https_proxy=127.0.0.1:7890）的首选
+        # 下载恒返回正常包；直连/镜像（第二源）按标记返回差异包或失败。
+        if [ "${https_proxy:-}" != "http://127.0.0.1:7890" ]; then
+            if [ -f "$S/wget-kernel-second-differ" ]; then cp "$F/mihomo-alt.gz" "$out" && exit 0 || exit 1; fi
+            if [ -f "$S/wget-kernel-second-fail" ]; then echo "stub wget: injected second-source failure" >&2; exit 4; fi
+        fi
+        cp "$F/mihomo.gz" "$out" && exit 0 || exit 1
+        ;;
+    *compressed-dist.tgz)
+        cp "$F/ui.tgz" "$out" && exit 0 || exit 1
+        ;;
+    *ui.tgz)
+        # 资产仓 bundle 名（官方 UI 资产名是 compressed-dist.tgz，资产
+        # 仓里存的是 ui.tgz；见 install.sh fetch_or_project 调用）。
+        cp "$F/ui.tgz" "$out" && exit 0 || exit 1
+        ;;
+    */geosite.dat)
+        cp "$F/GeoSite.dat" "$out" && exit 0 || exit 1
+        ;;
+    *GeoSite.dat)
+        # 资产仓 bundle 名（官方远程名是小写 geosite.dat）。
+        cp "$F/GeoSite.dat" "$out" && exit 0 || exit 1
+        ;;
+    */geoip.dat)
+        cp "$F/GeoIP.dat" "$out" && exit 0 || exit 1
+        ;;
+    *GeoIP.dat)
+        # 资产仓 bundle 名（官方远程名是小写 geoip.dat）。
+        cp "$F/GeoIP.dat" "$out" && exit 0 || exit 1
+        ;;
+    */country.mmdb)
+        cp "$F/Country.mmdb" "$out" && exit 0 || exit 1
+        ;;
+    */SHA256SUMS)
+        cp "$F/SHA256SUMS" "$out" && exit 0 || exit 1
+        ;;
+esac
+echo "stub wget: unhandled URL: $url" >&2
+exit 4

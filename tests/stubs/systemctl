@@ -1,0 +1,196 @@
+#!/bin/bash
+# stub systemctl：模拟 mihomo 服务状态。start/restart/enable --now 会像
+# 真实 systemd 一样执行 ExecStartPost（运行 /etc/mihomo/tproxy.sh）；
+# tproxy.sh 失败则启动失败、服务保持 inactive。
+# stop/restart 时模拟 ExecStopPost：单元文件含 ExecStopPost … tproxy.sh
+# stop 时才执行清理（旧版单元无此行，停服务后规则残留——即 P1-13
+# 修复前的 bug，M13c 用它做对照）。
+# 故障注入：$STUB_STATE/drop-rules-after-start 存在时，启动成功后立刻
+# 清掉规则（一次性），模拟"服务健康但规则缺失"，供 M11e 使用。
+# $STUB_STATE/mask-rule-after-start 存在时，启动成功后把本项目 plain
+# 规则换成他人掩码规则（链与表 100 路由保留，一次性），模拟"掩码在
+# 场、plain 缺失"，供 M11f 与 R7 使用。
+# $STUB_STATE/systemctl-restart-fail-once 存在时，下一次 restart 失败
+# （一次性，标记随即删除），供 S3 使用；$STUB_STATE/systemctl-restart-fail
+# 存在时，每次 restart 都失败（测试后须删除标记），供 S5 使用。
+# 状态文件：$STUB_STATE/svc-active、svc-enabled、api-up（0/1）。
+# cron 模拟（第二轮第 5 项）：is-active/is-enabled cron|crond 默认视为
+# 在跑且已启用（与 Debian/Ubuntu 默认一致）；$STUB_STATE/cron-inactive
+# 存在时 is-active 失败、is-enabled 仍成功（已安装但未运行）；
+# $STUB_STATE/cron-missing 存在时两者都失败（单元不存在）。
+S="${STUB_STATE:?STUB_STATE not set}"
+mkdir -p "$S"
+
+get() { cat "$S/$1" 2>/dev/null || echo 0; }
+set_state() { echo "$2" > "$S/$1"; }
+
+do_start() {
+    # 模拟 ExecStartPost：先跑 tproxy.sh，失败则服务启动失败
+    if [ -f /etc/mihomo/tproxy.sh ]; then
+        if ! bash /etc/mihomo/tproxy.sh; then
+            echo "stub systemctl: ExecStartPost tproxy.sh failed" >&2
+            set_state svc-active 0
+            set_state api-up 0
+            return 1
+        fi
+    fi
+    set_state svc-active 1
+    if [ -f "$S/api-fail" ]; then
+        set_state api-up 0
+    else
+        set_state api-up 1
+    fi
+    # 故障注入（一次性）：启动成功后清掉规则，模拟规则缺失
+    if [ -f "$S/drop-rules-after-start" ]; then
+        rm -f "$S/drop-rules-after-start"
+        if [ -f /etc/mihomo/tproxy.sh ]; then
+            bash /etc/mihomo/tproxy.sh stop >/dev/null 2>&1 || true
+        fi
+    fi
+    # 故障注入（一次性）：启动成功后把本项目 plain 规则换成他人掩码
+    # 规则（链与表 100 路由保留），模拟"掩码在场、plain 缺失"。
+    # sed 只删精确形态的 plain 行，不碰已有的掩码行。
+    if [ -f "$S/mask-rule-after-start" ]; then
+        rm -f "$S/mask-rule-after-start"
+        sed -i '/fwmark 0x1 lookup 100$/d' "$S/ip-rules.txt" 2>/dev/null || true
+        printf '%s\n' "100: from all fwmark 0x1/0x1 lookup 100" >> "$S/ip-rules.txt"
+    fi
+    return 0
+}
+
+do_stop_post() {
+    # 模拟 ExecStopPost：只在已安装的单元文件含该指令时执行；
+    # 失败只记日志，不影响停止操作本身（与 systemd 行为一致）。
+    if [ -f /etc/systemd/system/mihomo.service ] \
+        && grep -q 'ExecStopPost.*tproxy.sh stop' /etc/systemd/system/mihomo.service 2>/dev/null \
+        && [ -f /etc/mihomo/tproxy.sh ]; then
+        bash /etc/mihomo/tproxy.sh stop || true
+    fi
+}
+
+# 去掉 --quiet / --no-pager 等全局修饰参数
+args=()
+for a in "$@"; do
+    case "$a" in
+        --quiet|--no-pager) ;;
+        *) args+=("$a") ;;
+    esac
+done
+set -- "${args[@]}"
+
+case "$1" in
+    --version)
+        echo "systemd 255 (stub)"
+        exit 0
+        ;;
+    is-active)
+        # cron/crond 单元走独立标记（见文件头）；其余单元看 mihomo 状态。
+        case "${2:-}" in
+            cron|crond)
+                if [ -f "$S/cron-missing" ] || [ -f "$S/cron-inactive" ]; then exit 3; fi
+                exit 0
+                ;;
+        esac
+        [ "$(get svc-active)" = "1" ]
+        ;;
+    is-enabled)
+        case "${2:-}" in
+            cron|crond)
+                if [ -f "$S/cron-missing" ]; then exit 1; fi
+                exit 0
+                ;;
+        esac
+        [ "$(get svc-enabled)" = "1" ]
+        ;;
+    stop)
+        do_stop_post
+        set_state svc-active 0
+        set_state api-up 0
+        exit 0
+        ;;
+    start)
+        do_start
+        exit $?
+        ;;
+    restart)
+        if [ -f "$S/systemctl-restart-fail" ] || [ -f "$S/systemctl-restart-fail-once" ]; then
+            rm -f "$S/systemctl-restart-fail-once"
+            do_stop_post
+            set_state svc-active 0
+            set_state api-up 0
+            echo "stub systemctl: injected restart failure" >&2
+            exit 1
+        fi
+        do_stop_post
+        set_state svc-active 0
+        set_state api-up 0
+        do_start
+        _rc=$?
+        # 模拟 mihomo 重启后拉取订阅更新缓存（仅 restart 路径：全新安装
+        # 的 start/enable --now 不应凭空生出缓存，否则 I15 的首次拉取
+        # 宽限 SKIP 测不到）。缓存不存在则创建（模拟拉取成功写缓存），
+        # 存在则 mtime 推后 10 秒；$STUB_STATE/fetch-fail 存在时不创建
+        # 也不更新，模拟拉取失败；$STUB_STATE/fetch-zero-nodes 存在时
+        # 创建的缓存为 proxies: []（0 节点、mtime 新鲜），模拟"订阅
+        # 拉到了但为空"，供 S7 使用（缓存已存在时仍只推后 mtime、不
+        # 动内容，保证回滚恢复的旧缓存逐字节一致）。
+        if [ "$_rc" -eq 0 ] && [ ! -f "$S/fetch-fail" ]; then
+            if [ ! -f /etc/mihomo/providers/airport1.yaml ]; then
+                mkdir -p /etc/mihomo/providers
+                if [ -f "$S/fetch-zero-nodes" ]; then
+                    printf 'proxies: []\n' > /etc/mihomo/providers/airport1.yaml
+                else
+                    cat > /etc/mihomo/providers/airport1.yaml <<'EOF'
+proxies:
+  - name: "node1"
+    type: vless
+    server: 1.2.3.4
+    port: 443
+  - name: "node2"
+    type: vless
+    server: 5.6.7.8
+    port: 443
+  - name: "node3"
+    type: trojan
+    server: 9.10.11.12
+    port: 443
+EOF
+                fi
+            else
+                _cur_mtime=$(stat -c %Y /etc/mihomo/providers/airport1.yaml 2>/dev/null || echo 0)
+                case "$_cur_mtime" in ''|*[!0-9]*) _cur_mtime=0 ;; esac
+                touch -d "@$(( _cur_mtime + 10 ))" /etc/mihomo/providers/airport1.yaml
+            fi
+        fi
+        exit $_rc
+        ;;
+    enable)
+        set_state svc-enabled 1
+        if [ "$2" = "--now" ]; then
+            do_start
+            exit $?
+        fi
+        exit 0
+        ;;
+    disable)
+        set_state svc-enabled 0
+        exit 0
+        ;;
+    daemon-reload)
+        exit 0
+        ;;
+    status)
+        if [ "$(get svc-active)" = "1" ]; then
+            echo "● mihomo.service - Mihomo Daemon (stub)"
+            echo "   Active: active (running)"
+        else
+            echo "● mihomo.service - Mihomo Daemon (stub)"
+            echo "   Active: inactive (dead)"
+        fi
+        exit 0
+        ;;
+    *)
+        echo "stub systemctl: unsupported args: $*" >&2
+        exit 1
+        ;;
+esac

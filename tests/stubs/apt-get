@@ -1,0 +1,44 @@
+#!/bin/bash
+# stub apt-get：模拟 apt 系依赖自动安装（第二轮第 5 项）。
+#   apt-get install -y <包...> -> 调用记入 $STUB_STATE/apt-get.log，并把
+#     对应命令"装"进 $STUB_STATE/bin-installed/（优先软链同名桩，否则软链
+#     真实命令），供 install.sh 安装后的 command -v 复核通过；测试方须把
+#     bin-installed 放进 PATH（见 run-tests.sh 的 P6f/P6g）。
+#   故障注入：$STUB_STATE/apt-get-fail 存在时 install 返回 1（仍记录调用）。
+# 包→命令映射与 install.sh 的 cmd_to_pkg 反向一致；未知包直接报错（避免
+# 测试在未模拟的包上悄悄通过）。update 等其他子命令不支持。
+S="${STUB_STATE:?STUB_STATE not set}"
+echo "apt-get $*" >> "$S/apt-get.log"
+case "$1" in
+    install) ;;
+    *) echo "stub apt-get: unsupported args: $*" >&2; exit 1 ;;
+esac
+if [ -f "$S/apt-get-fail" ]; then
+    echo "E: 无法定位软件包（注入故障）" >&2
+    exit 1
+fi
+shift
+[ "$1" = "-y" ] && shift
+mkdir -p "$S/bin-installed"
+_stubs="$(dirname "$S")/stubs"
+for _pkg in "$@"; do
+    case "$_pkg" in
+        wget) _cmd=wget ;;
+        curl) _cmd=curl ;;
+        tar) _cmd=tar ;;
+        gzip) _cmd=gzip ;;
+        util-linux) _cmd=flock ;;
+        coreutils) _cmd=sha256sum ;;
+        iptables) _cmd=iptables ;;
+        iproute2) _cmd=ip ;;
+        *) echo "stub apt-get: unknown package: $_pkg" >&2; exit 1 ;;
+    esac
+    if [ -e "$_stubs/$_cmd" ]; then
+        ln -sf "$_stubs/$_cmd" "$S/bin-installed/$_cmd" || exit 1
+    else
+        _real="$(PATH=/usr/bin:/bin command -v "$_cmd" 2>/dev/null || true)"
+        [ -n "$_real" ] || { echo "stub apt-get: cannot provide command: $_cmd" >&2; exit 1; }
+        ln -sf "$_real" "$S/bin-installed/$_cmd" || exit 1
+    fi
+done
+exit 0
