@@ -1,0 +1,33 @@
+#!/bin/bash
+# stub mihomo（PATH 中的 mihomo 命令，供 switch-sub.sh 的 mihomo -t 与
+# auto-maintain.sh 的 mihomo -v 用；/usr/local/bin/mihomo 由 fixture 假
+# 二进制担任）。若已安装二进制存在，委托给它 —— 使 `mihomo -v` 反映已
+# 安装版本（auto-maintain 的版本对比依赖这一点），与真机行为一致。
+S="${STUB_STATE:-/nonexistent}"
+if [ -x /usr/local/bin/mihomo ]; then
+    exec /usr/local/bin/mihomo "$@"
+fi
+if [ "$1" = "-v" ]; then
+    echo "Mihomo Meta v1.19.32 linux amd64 with go1.23.0"
+    exit 0
+fi
+if [ "$1" = "-t" ]; then
+    if [ -f "$S/mihomo-t-fail" ]; then
+        echo "fake: configuration test failed (injected)" >&2
+        exit 1
+    fi
+    dir=""
+    prev=""
+    for a in "$@"; do
+        if [ "$prev" = "-d" ]; then dir="$a"; fi
+        prev="$a"
+    done
+    if [ -f "$dir/config.yaml" ]; then
+        echo "configuration test is successful"
+        exit 0
+    fi
+    echo "fake: no config.yaml in $dir" >&2
+    exit 1
+fi
+echo "stub mihomo: unknown args: $*" >&2
+exit 1
